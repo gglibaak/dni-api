@@ -1,49 +1,59 @@
-import { chromium } from "playwright";
 import express from "express";
+import qs from 'qs';
+import * as cheerio from 'cheerio';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 2000;
 
-app.get("/", async (req, res) => {
-    const dni = req.query.dni || "34564345";
-    const result = await fetchData(dni);
+const validApiKeys = new Set([process.env.API_KEY]);
+
+app.use((req, res, next) => {
+    const apiKey = req.headers['authorization']?.split(' ')[1];
+    if (validApiKeys.has(apiKey)) {
+      next();
+    } else {
+      res.status(401).json({ error: 'Unauthorized' });
+    }
+  });
+
+app.get("/:dni?", async (req, res) => {
+    const dni = req.params.dni || process.env.DNI_DEFAULT;
+    const result = await sendPostRequest(dni);
     res.send(result);
 });
 
-async function fetchData(dni) {
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
-    const page = await context.newPage();
-
-    await page.goto("https://www.cuitonline.com/search.php?q=" + dni);
+async function sendPostRequest(dni) {
+    const data = qs.stringify({ criterio: dni }); // Formatear los datos correctamente
 
     try {
-        const hasResult = await page.$eval('.denominacion', el => el.textContent);
-        if (!hasResult) {
-            await browser.close();
-            return { error: "No se encontraron resultados" };
+        const response = await axios.post('https://datuar.com/pedido.php', data, {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+            }
+        });
+
+        const $ = cheerio.load(response.data);
+
+        const valueSex = $('#Datos img').attr('alt');
+        const sex = valueSex === 'Hombre' ? 'M' : (valueSex === 'Mujer' ? 'F' : 'N/A');
+        let name = $('#Datos h5').eq(1).text().trim();
+        name = name.replace(/,/g, '');
+        const cuil = $('#Datos p:contains("CUIL") span').text().trim();
+        const dni = cuil.slice(2, -1);
+
+        if (!name) {
+            return { error: 'No data found' };
         }
+
+        return { name, sex, dni };
     } catch (error) {
-        await browser.close();
-        return { error: "No se encontraron resultados" };
+        console.error('Error sending POST request:', error);
+        return { error: 'Error sending POST request' };
     }
-
-    const nombreApellido = await page.$eval('.denominacion', el => el.textContent);
-    const nameFormatted = nombreApellido.replace(/^\s+/g, '');
-
-    const cuit = await page.$eval('.cuit', el => el.textContent);
-    const match = cuit.match(/-(\d{8})-/);
-    const extractedNumber = match ? match[1] : null;
-
-    const sex = await page.$eval('.doc-facets', el => el.innerHTML.includes('masculino') ? 'M' : 'F');
-
-    await browser.close();
-
-    return {
-        name: nameFormatted,
-        dni: extractedNumber,
-        sex: sex
-    };
 }
 
 app.listen(port, () => {
